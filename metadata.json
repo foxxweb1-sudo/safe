@@ -1,0 +1,6 @@
+{
+  "name": "الخزنة الشخصية الآمنة | Secure Personal Vault",
+  "description": "منصة مركزية مشفرة لإدارة وتخزين الملفات الحساسة، متغيرات .env، الحسابات وكلمات المرور، ومفاتيح API متصلة مع Firebase",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
