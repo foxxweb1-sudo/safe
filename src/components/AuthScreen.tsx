@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Lock, Key, ArrowLeft, ArrowRight, Eye, EyeOff, CheckCircle2, AlertCircle, Database } from 'lucide-react';
+import { Shield, Lock, Key, ArrowLeft, ArrowRight, Eye, EyeOff, CheckCircle2, AlertCircle } from 'lucide-react';
 import { FirebaseVaultService } from '../services/firebaseRtdb';
 import { Language, translations } from '../utils/i18n';
 
@@ -92,11 +92,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onUnlock, lang, setLang 
       <div className="absolute bottom-10 right-1/4 w-80 h-80 bg-cyan-500/5 rounded-full blur-3xl pointer-events-none" />
       
       {/* Header controls: Language selector */}
-      <div className="absolute top-6 left-6 right-6 flex items-center justify-between z-10">
-        <div className="flex items-center gap-2 text-xs text-neutral-400 bg-neutral-900/80 border border-neutral-800/80 px-3 py-1.5 rounded-lg backdrop-blur-sm">
-          <Database className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-          <span className="font-mono text-[11px] text-neutral-300">Firebase RTDB Connected</span>
-        </div>
+      <div className="absolute top-6 left-6 right-6 flex items-center justify-end z-10">
         <button
           type="button"
           onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
@@ -208,16 +204,6 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onUnlock, lang, setLang 
             </button>
           </form>
         )}
-
-        <div className="mt-8 pt-4 border-t border-neutral-800/80 flex flex-col items-center gap-1 text-[11px] text-neutral-500 font-mono">
-          <div className="flex items-center gap-1.5">
-            <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-            <span>Path: /admin/password</span>
-          </div>
-          <span className="text-neutral-600 text-[10px] truncate max-w-full">
-            studio-7413069484-7dc65-default-rtdb.firebaseio.com
-          </span>
-        </div>
       </div>
     </div>
   );
