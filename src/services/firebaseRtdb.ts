@@ -1,4 +1,5 @@
 import { VaultFile, VaultEnv, VaultPassword, VaultApi, VaultLink, AllVaultData } from '../types/vault';
+import { hashPassword } from '../utils/vaultUtils';
 
 const FIREBASE_DB_URL = 'https://studio-7413069484-7dc65-default-rtdb.firebaseio.com';
 const STORAGE_PREFIX = 'secure_vault_cache_';
@@ -21,9 +22,18 @@ const setCached = <T>(key: string, data: T): void => {
   }
 };
 
-// Generic REST fetch with timeout
+export interface AdminStatusResult {
+  hasPassword: boolean;
+  isPermissionDenied: boolean;
+  errorMessage?: string;
+}
+
+// Generic REST fetch with timeout and optional auth parameter
 async function fetchRtdb<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const url = `${FIREBASE_DB_URL}/${path.replace(/^\//, '')}.json`;
+  const secret = localStorage.getItem('vault_rtdb_secret')?.trim();
+  const authQuery = secret ? `?auth=${encodeURIComponent(secret)}` : '';
+  const cleanPath = path.replace(/^\//, '');
+  const url = `${FIREBASE_DB_URL}/${cleanPath}.json${authQuery}`;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 8000);
 
@@ -37,6 +47,11 @@ async function fetchRtdb<T>(path: string, options: RequestInit = {}): Promise<T>
       },
     });
     clearTimeout(timeoutId);
+
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(`Permission denied (HTTP ${response.status})`);
+    }
+
     if (!response.ok) {
       throw new Error(`Firebase RTDB request failed with status: ${response.status}`);
     }
@@ -49,63 +64,106 @@ async function fetchRtdb<T>(path: string, options: RequestInit = {}): Promise<T>
 }
 
 export const FirebaseVaultService = {
-  // Check admin password
-  async verifyAdminPassword(inputPassword: string): Promise<{ success: boolean; isFirstTimeSetup?: boolean }> {
+  // Database Secret Management for Locked RTDB
+  getDbSecret(): string {
+    return localStorage.getItem('vault_rtdb_secret') || '';
+  },
+
+  setDbSecret(secret: string): void {
+    if (secret && secret.trim()) {
+      localStorage.setItem('vault_rtdb_secret', secret.trim());
+    } else {
+      localStorage.removeItem('vault_rtdb_secret');
+    }
+  },
+
+  // Check admin setup and permission status accurately
+  async checkAdminPasswordStatus(): Promise<AdminStatusResult> {
     try {
-      const storedPassword = await fetchRtdb<string | null>('admin/password');
-      
-      // If no password set yet in DB, check local cache or allow initialization
-      if (storedPassword === null || storedPassword === undefined || storedPassword === '') {
-        const cachedMaster = localStorage.getItem('vault_master_pwd');
-        if (!cachedMaster) {
-          return { success: false, isFirstTimeSetup: true };
-        }
-        return { success: inputPassword.trim() === cachedMaster.trim() };
+      const stored = await fetchRtdb<any>('admin');
+      if (stored && (stored.password_hash || stored.password)) {
+        return { hasPassword: true, isPermissionDenied: false };
+      }
+      return { hasPassword: false, isPermissionDenied: false };
+    } catch (err: any) {
+      const msg = String(err?.message || err);
+      const isPerm = msg.includes('401') || msg.includes('403') || msg.toLowerCase().includes('permission denied');
+      return {
+        hasPassword: false,
+        isPermissionDenied: isPerm,
+        errorMessage: isPerm
+          ? 'قاعدة بيانات Firebase مقفلة بصلاحيات الأمان (Permission Denied).'
+          : 'تعذر الاتصال بقاعدة بيانات Firebase.'
+      };
+    }
+  },
+
+  // Verify input password with SHA-256 hash comparison
+  async verifyAdminPassword(inputPassword: string): Promise<{ success: boolean; isPermissionDenied?: boolean; errorMessage?: string }> {
+    try {
+      const hashedInput = await hashPassword(inputPassword.trim());
+      const adminData = await fetchRtdb<any>('admin');
+
+      if (!adminData || (!adminData.password_hash && !adminData.password)) {
+        return { success: false, errorMessage: 'لم يتم العثور على كلمة مرور مسجلة في قاعدة البيانات' };
       }
 
-      const match = String(storedPassword).trim() === inputPassword.trim();
-      if (match) {
-        localStorage.setItem('vault_master_pwd', inputPassword.trim());
+      // Check SHA-256 hash
+      if (adminData.password_hash) {
+        return { success: adminData.password_hash === hashedInput };
       }
-      return { success: match };
-    } catch (err) {
-      console.warn('Network error checking Firebase password, falling back to local verification:', err);
-      const cachedMaster = localStorage.getItem('vault_master_pwd');
-      if (cachedMaster && inputPassword.trim() === cachedMaster.trim()) {
+
+      // Legacy plaintext match + auto upgrade to hash
+      if (adminData.password && adminData.password === inputPassword.trim()) {
+        try {
+          await fetchRtdb('admin', {
+            method: 'PATCH',
+            body: JSON.stringify({
+              password_hash: hashedInput,
+              upgraded_at: new Date().toISOString(),
+            }),
+          });
+          await fetchRtdb('admin/password', { method: 'DELETE' });
+        } catch {}
         return { success: true };
       }
-      // If completely fresh and network failed
-      if (!cachedMaster) {
-        return { success: false, isFirstTimeSetup: true };
-      }
+
       return { success: false };
+    } catch (err: any) {
+      const msg = String(err?.message || err);
+      const isPerm = msg.includes('401') || msg.includes('403') || msg.toLowerCase().includes('permission denied');
+      return {
+        success: false,
+        isPermissionDenied: isPerm,
+        errorMessage: isPerm
+          ? 'قاعدة البيانات مقفلة بصلاحيات الأمان (Permission Denied). يرجى إدخال Database Secret أو مراجعة القواعد.'
+          : 'تعذر التحقق من كلمة المرور بسبب خطأ في الشبكة.'
+      };
     }
   },
 
-  // Set or update admin password
-  async setAdminPassword(newPassword: string): Promise<boolean> {
+  // Set or update admin password with SHA-256 hashing
+  async setAdminPassword(newPassword: string): Promise<{ success: boolean; error?: string }> {
     try {
-      await fetchRtdb('admin/password', {
-        method: 'PUT',
-        body: JSON.stringify(newPassword.trim()),
+      const hashed = await hashPassword(newPassword.trim());
+      await fetchRtdb('admin', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          password_hash: hashed,
+          configured_at: new Date().toISOString(),
+        }),
       });
-      localStorage.setItem('vault_master_pwd', newPassword.trim());
-      return true;
-    } catch (err) {
-      console.error('Failed to set admin password on Firebase, saving locally:', err);
-      localStorage.setItem('vault_master_pwd', newPassword.trim());
-      return true;
-    }
-  },
-
-  // Check if admin password exists
-  async checkAdminPasswordExists(): Promise<boolean> {
-    try {
-      const storedPassword = await fetchRtdb<string | null>('admin/password');
-      if (storedPassword) return true;
-      return !!localStorage.getItem('vault_master_pwd');
-    } catch {
-      return !!localStorage.getItem('vault_master_pwd');
+      return { success: true };
+    } catch (err: any) {
+      console.error('Failed to set admin password on Firebase:', err);
+      const msg = String(err?.message || err);
+      const isPerm = msg.includes('401') || msg.includes('403') || msg.toLowerCase().includes('permission denied');
+      return {
+        success: false,
+        error: isPerm
+          ? 'تعذر الحفظ في Firebase بسبب قواعد الحماية (Permission Denied). يرجى ضبط القواعد في Firebase Console أولاً أو استخدام Database Secret.'
+          : 'تعذر الاتصال بـ Firebase.'
+      };
     }
   },
 
@@ -117,7 +175,7 @@ export const FirebaseVaultService = {
       setCached('files', list);
       return list;
     } catch (err) {
-      console.warn('Using cached files due to network:', err);
+      console.warn('Using cached files due to network/rules:', err);
       return getCached<VaultFile[]>('files') || [];
     }
   },
@@ -129,7 +187,7 @@ export const FirebaseVaultService = {
         body: JSON.stringify(file),
       });
     } catch (err) {
-      console.warn('Saved file locally due to network:', err);
+      console.warn('Saved file locally due to network/rules:', err);
     }
     const current = getCached<VaultFile[]>('files') || [];
     const index = current.findIndex(f => f.id === file.id);
@@ -158,7 +216,7 @@ export const FirebaseVaultService = {
       setCached('env', list);
       return list;
     } catch (err) {
-      console.warn('Using cached env due to network:', err);
+      console.warn('Using cached env due to network/rules:', err);
       return getCached<VaultEnv[]>('env') || [];
     }
   },
@@ -170,7 +228,7 @@ export const FirebaseVaultService = {
         body: JSON.stringify(env),
       });
     } catch (err) {
-      console.warn('Saved env locally due to network:', err);
+      console.warn('Saved env locally due to network/rules:', err);
     }
     const current = getCached<VaultEnv[]>('env') || [];
     const index = current.findIndex(e => e.id === env.id);
@@ -199,7 +257,7 @@ export const FirebaseVaultService = {
       setCached('passwords', list);
       return list;
     } catch (err) {
-      console.warn('Using cached passwords due to network:', err);
+      console.warn('Using cached passwords due to network/rules:', err);
       return getCached<VaultPassword[]>('passwords') || [];
     }
   },
@@ -211,7 +269,7 @@ export const FirebaseVaultService = {
         body: JSON.stringify(pw),
       });
     } catch (err) {
-      console.warn('Saved password locally due to network:', err);
+      console.warn('Saved password locally due to network/rules:', err);
     }
     const current = getCached<VaultPassword[]>('passwords') || [];
     const index = current.findIndex(p => p.id === pw.id);
@@ -240,7 +298,7 @@ export const FirebaseVaultService = {
       setCached('apis', list);
       return list;
     } catch (err) {
-      console.warn('Using cached apis due to network:', err);
+      console.warn('Using cached apis due to network/rules:', err);
       return getCached<VaultApi[]>('apis') || [];
     }
   },
@@ -252,7 +310,7 @@ export const FirebaseVaultService = {
         body: JSON.stringify(api),
       });
     } catch (err) {
-      console.warn('Saved api locally due to network:', err);
+      console.warn('Saved api locally due to network/rules:', err);
     }
     const current = getCached<VaultApi[]>('apis') || [];
     const index = current.findIndex(a => a.id === api.id);
@@ -281,7 +339,7 @@ export const FirebaseVaultService = {
       setCached('links', list);
       return list;
     } catch (err) {
-      console.warn('Using cached links due to network:', err);
+      console.warn('Using cached links due to network/rules:', err);
       return getCached<VaultLink[]>('links') || [];
     }
   },
@@ -293,7 +351,7 @@ export const FirebaseVaultService = {
         body: JSON.stringify(link),
       });
     } catch (err) {
-      console.warn('Saved link locally due to network:', err);
+      console.warn('Saved link locally due to network/rules:', err);
     }
     const current = getCached<VaultLink[]>('links') || [];
     const index = current.findIndex(l => l.id === link.id);

@@ -25,6 +25,15 @@ export function formatDate(isoString: string, lang: 'ar' | 'en' = 'ar'): string 
   }
 }
 
+export async function hashPassword(password: string): Promise<string> {
+  const enc = new TextEncoder();
+  const salt = 'cybenode_vault_salt_';
+  const data = enc.encode(salt + password);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 export function generatePassword(options: {
   length?: number;
   includeUppercase?: boolean;
